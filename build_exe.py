@@ -21,7 +21,7 @@ def build_executable():
         "--add-data=constants.py;.",    # Include constants file
         "--hidden-import=pygame",       # Ensure pygame is included
         "--hidden-import=numpy",        # Ensure numpy is included
-        "--hidden-import=requests",     # Ensure requests is included
+        # (requests and LLM-related hidden imports removed)
         "--distpath=dist",              # Output directory
         "--workpath=build",             # Temporary build directory
         "--clean",                      # Clean previous builds

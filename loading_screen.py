@@ -13,7 +13,7 @@ class LoadingScreen:
         self.progress = 0.0  # 0.0 to 1.0
         self.current_task = "Initializing..."
         self.tasks_completed = 0
-        self.total_tasks = 5  # Adjust based on actual loading tasks
+        self.total_tasks = 4  # Pygame, Player, Chunks, NPCs
         
         # Animation
         self.time = 0.0
@@ -120,11 +120,10 @@ class LoadingScreen:
         
         # Draw loading tips
         tips = [
-            "Tip: Press 'E' to interact with NPCs",
-            "Tip: NPCs have memories and will remember you",
             "Tip: Press 'V' to toggle NPC vision display",
-            "Tip: NPCs use AI to respond intelligently",
-            "Tip: The world is procedurally generated"
+            "Tip: The world is procedurally generated",
+            "Tip: Use F11 to toggle fullscreen",
+            "Tip: WASD to move"
         ]
         
         tip_index = int(self.time * 0.5) % len(tips)
