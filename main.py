@@ -68,7 +68,6 @@ class Game:
                 time.sleep(0.1)
                 test_npc = NPC("Bob", SCREEN_WIDTH // 2 + 150, SCREEN_HEIGHT // 2 + 100)
                 test_npc.set_facing_direction(225)
-                test_npc.add_goal("patrol area", priority=3)
                 self.npcs = [test_npc]
                 self.loading_tasks['npcs'] = True
                 self._update_loading_progress("NPCs ready", 4)

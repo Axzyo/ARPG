@@ -9,7 +9,6 @@ class NPC:
         self.x = x
         self.y = y
         self.memory_bank = MemoryBank(max_memories=200)
-        self.goals = []
         self.current_action = "idle"
         
         # Visual properties
@@ -53,29 +52,7 @@ class NPC:
             npc_name=self.name
         )
 
-    # --- Goals and actions ---
-    def add_goal(self, goal, priority=1):
-        self.goals.append({
-            "description": goal,
-            "priority": priority,
-            "created_time": pygame.time.get_ticks(),
-            "completed": False
-        })
-        self.goals.sort(key=lambda g: g["priority"], reverse=True)
-    
-    def complete_goal(self, goal_description):
-        for goal in self.goals:
-            if goal["description"] == goal_description:
-                goal["completed"] = True
-                self.add_memory("thought", "self", f"Completed goal: {goal_description}", 3.0)
-                break
-    
-    def remove_completed_goals(self):
-        self.goals = [goal for goal in self.goals if not goal["completed"]]
-    
-    def get_active_goals(self):
-        return [goal for goal in self.goals if not goal["completed"]]
-    
+    # --- Action state ---
     def set_action(self, action):
         if self.current_action != action:
             self.add_memory("thought", "self", f"Changed action from {self.current_action} to {action}", 1.0)
