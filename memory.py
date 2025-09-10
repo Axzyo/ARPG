@@ -1,49 +1,75 @@
 import pygame
 import uuid
 import math
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 
 class Memory:
-    def __init__(self, sense: str, location: tuple, target: str, data: str, significance: float = 1.0):
+    def __init__(
+        self,
+        sense: str,
+        target: str,
+        description: Any,
+        location1: tuple,
+        location2: Optional[tuple] = None,
+        significance_0_to_1: float = 1.0,
+        time_ms: Optional[int] = None,
+        meta: Optional[Dict] = None,
+    ):
         """
-        Create a new memory
-        
-        Args:
-            sense: Type of sensory input ('saw', 'heard', 'felt')
-            location: (x, y) coordinates where memory occurred
-            target: What/who the memory is about
-            data: The actual content/details of the memory
-            significance: Importance level (0.0 to 10.0, higher = more important)
+        New memory schema (hot-swappable, JSON-friendly):
+        {
+            "sense": str,
+            "target": str,
+            "description": Any,               # e.g., dict for items, list for state tags, or string
+            "location1": [x, y],              # self position
+            "location2": [x, y],              # target position (or same as location1)
+            "time": int,                      # pygame ticks
+            "meta": {
+                "id": str,                    # unique id
+                "sig": float,                 # significance in [0,1]
+                "count": int,
+                "first_seen": int,
+                "last_seen": int,
+                "links": list[str]
+            }
+        }
         """
-        self.id = str(uuid.uuid4())  # Unique identifier
         self.sense = sense
-        self.time = pygame.time.get_ticks()
-        self.location = location  # (x, y) tuple
         self.target = target
-        self.data = data
-        self.significance = max(0.0, min(10.0, significance))  # Clamp between 0-10
+        self.description = description
+        self.location1 = (location1[0], location1[1]) if location1 else (0, 0)
+        self.location2 = (location2[0], location2[1]) if location2 else self.location1
+        self.time = time_ms if time_ms is not None else pygame.time.get_ticks()
+        # Normalize significance to [0,1]
+        sig = max(0.0, min(1.0, significance_0_to_1))
+        self.meta = meta.copy() if meta else {}
+        self.meta.setdefault('id', f"evt_{self.time}_{int(self.location2[0])}_{int(self.location2[1])}_{uuid.uuid4().hex[:2]}")
+        self.meta.setdefault('sig', sig)
+        self.meta.setdefault('count', 1)
+        self.meta.setdefault('first_seen', self.time)
+        self.meta.setdefault('last_seen', self.time)
+        self.meta.setdefault('links', [])
     
     def age_in_seconds(self) -> float:
-        """Get the age of this memory in seconds"""
         return (pygame.time.get_ticks() - self.time) / 1000.0
     
     def distance_from(self, x: float, y: float) -> float:
-        """Calculate distance from this memory's location to given coordinates"""
-        return math.sqrt((self.location[0] - x) ** 2 + (self.location[1] - y) ** 2)
+        # Distance from the actor (location1) by default
+        return math.sqrt((self.location1[0] - x) ** 2 + (self.location1[1] - y) ** 2)
     
     def __str__(self) -> str:
-        return f"Memory({self.sense}): {self.target} - {self.data} [sig: {self.significance:.1f}]"
+        sig = self.meta.get('sig', 0.0)
+        return f"Memory({self.sense}): {self.target} - {self.description} [sig: {sig:.2f}]"
     
     def to_dict(self) -> Dict:
-        """Convert memory to dictionary for serialization"""
         return {
-            'id': self.id,
             'sense': self.sense,
-            'time': self.time,
-            'location': self.location,
             'target': self.target,
-            'data': self.data,
-            'significance': self.significance
+            'description': self.description,
+            'location1': [self.location1[0], self.location1[1]],
+            'location2': [self.location2[0], self.location2[1]],
+            'time': self.time,
+            'meta': self.meta,
         }
 
 class MemoryBank:
@@ -76,9 +102,23 @@ class MemoryBank:
         if len(self.memories) > self.max_memories:
             self._remove_oldest_memory()
     
-    def create_memory(self, sense: str, location: tuple, target: str, data: str, significance: float = 1.0, npc_name: str = "Unknown") -> Memory:
-        """Create and add a new memory"""
-        memory = Memory(sense, location, target, data, significance)
+    def create_memory(self, sense: str, location: tuple, target: str, data: Any, significance: float = 1.0, npc_name: str = "Unknown", target_location: Optional[tuple] = None, meta: Optional[Dict] = None) -> Memory:
+        """Create and add a new memory (backward-compatible signature).
+        - `location` maps to `location1`
+        - `data` maps to `description`
+        - `significance` in [0,10] is normalized to meta['sig'] in [0,1]
+        - `target_location` (optional) maps to `location2` (defaults to `location1`)
+        """
+        sig01 = max(0.0, min(1.0, (significance / 10.0)))
+        memory = Memory(
+            sense=sense,
+            target=target,
+            description=data,
+            location1=location,
+            location2=target_location or location,
+            significance_0_to_1=sig01,
+            meta=meta,
+        )
         self.add_memory(memory)
         
         # Print new memory to console with NPC identification
@@ -91,8 +131,8 @@ class MemoryBank:
         if not self.memories:
             return
         
-        # Find the oldest memory with lowest significance
-        oldest_memory = min(self.memories, key=lambda m: (m.significance, -m.time))
+        # Find the oldest memory with lowest significance (meta.sig)
+        oldest_memory = min(self.memories, key=lambda m: (m.meta.get('sig', 0.0), -m.time))
         self.remove_memory(oldest_memory)
     
     def remove_memory(self, memory: Memory) -> None:
@@ -127,7 +167,7 @@ class MemoryBank:
     
     def get_memories_by_significance(self, min_significance: float = 0.0) -> List[Memory]:
         """Get memories above a certain significance threshold"""
-        return [m for m in self.memories if m.significance >= min_significance]
+        return [m for m in self.memories if m.meta.get('sig', 0.0) >= min_significance]
     
     def get_recent_memories(self, max_age_seconds: float) -> List[Memory]:
         """Get memories newer than max_age_seconds"""
@@ -155,7 +195,7 @@ class MemoryBank:
                 continue
             
             # Check significance
-            if memory.significance < min_significance:
+            if memory.meta.get('sig', 0.0) < min_significance:
                 continue
             
             # Check location proximity
@@ -176,14 +216,14 @@ class MemoryBank:
         def relevance_score(mem):
             age_factor = max(0.1, 1.0 - (mem.age_in_seconds() / max_age_seconds))
             distance_factor = max(0.1, 1.0 - (mem.distance_from(current_location[0], current_location[1]) / radius))
-            return mem.significance * age_factor * distance_factor
+            return mem.meta.get('sig', 0.0) * age_factor * distance_factor
         
         relevant.sort(key=relevance_score, reverse=True)
         return relevant
     
     def get_most_significant_memories(self, count: int = 10) -> List[Memory]:
         """Get the most significant memories"""
-        sorted_memories = sorted(self.memories, key=lambda m: m.significance, reverse=True)
+        sorted_memories = sorted(self.memories, key=lambda m: m.meta.get('sig', 0.0), reverse=True)
         return sorted_memories[:count]
     
     def search_memories(self, query: str) -> List[Memory]:
@@ -192,12 +232,13 @@ class MemoryBank:
         matching = []
         
         for memory in self.memories:
-            if (query_lower in memory.data.lower() or 
+            desc_text = str(memory.description).lower()
+            if (query_lower in desc_text or 
                 query_lower in memory.target.lower()):
                 matching.append(memory)
         
         # Sort by significance
-        matching.sort(key=lambda m: m.significance, reverse=True)
+        matching.sort(key=lambda m: m.meta.get('sig', 0.0), reverse=True)
         return matching
     
     def get_memory_stats(self) -> Dict:
@@ -215,13 +256,13 @@ class MemoryBank:
         for sense, memories in self.sense_index.items():
             sense_counts[sense] = len(memories)
         
-        significances = [m.significance for m in self.memories]
+        significances = [m.meta.get('sig', 0.0) for m in self.memories]
         ages = [m.age_in_seconds() for m in self.memories]
         
         return {
             'total_memories': len(self.memories),
             'sense_breakdown': sense_counts,
-            'avg_significance': sum(significances) / len(significances),
+            'avg_significance': (sum(significances) / len(significances)) if significances else 0.0,
             'oldest_memory_age': max(ages),
             'newest_memory_age': min(ages)
         }
