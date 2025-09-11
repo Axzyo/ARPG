@@ -178,6 +178,37 @@ def euclidish_dist(a: np.ndarray, rounds: int = 6) -> np.ndarray:
 
 
 def prune_tendrils(land: np.ndarray, band: np.ndarray, min_width: int = 3) -> np.ndarray:
+    """Remove land filaments thinner than min_width (in tiles) only in the band,
+    using 8-neigh distance and reconstruction (preserves true isthmuses)."""
+    dist = euclidish_dist(land)
+    core = land & (dist >= float(min_width))
+    recon = core.copy()
+    for _ in range(max(0, int(min_width) - 1)):
+        recon = _dilate_8(recon) & land
+    out = land.copy()
+    out[band] = recon[band]
+    return out
+
+
+def majority_smooth(mask: np.ndarray, band: np.ndarray, rounds: int = 1) -> np.ndarray:
+    """3x3 majority filter (8-neigh) applied only inside 'band'."""
+    m = mask.astype(np.uint8)
+    for _ in range(max(1, rounds)):
+        s = (
+            m
+            + _shift(m, 1, 0, 0) + _shift(m, -1, 0, 0)
+            + _shift(m, 0, 1, 0) + _shift(m, 0, -1, 0)
+            + _shift(m, 1, 1, 0) + _shift(m, 1, -1, 0)
+            + _shift(m, -1, 1, 0) + _shift(m, -1, -1, 0)
+        )
+        new = (s >= 5).astype(bool)
+        mask[band] = new[band]
+        m = mask.astype(np.uint8)
+    return mask
+
+
+def prune_tendrils_cross(land: np.ndarray, band: np.ndarray, min_width: int = 3) -> np.ndarray:
+    # kept for potential reference; not used
     dist = manhattan_dist_to_water(land)
     core = land & (dist >= int(min_width))
     recon = geodesic_dilate(core, land, iters=max(0, int(min_width) - 1))
@@ -189,6 +220,8 @@ def prune_tendrils(land: np.ndarray, band: np.ndarray, min_width: int = 3) -> np
 def fill_small_lakes_on_halo(land_halo: np.ndarray, max_area: int = 150) -> np.ndarray:
     H, W = land_halo.shape
     water = ~land_halo
+
+    # Ocean flood-fill from border water (8-neigh)
     ocean = np.zeros_like(water, dtype=bool)
     q = deque()
     for x in range(W):
@@ -207,19 +240,20 @@ def fill_small_lakes_on_halo(land_halo: np.ndarray, max_area: int = 150) -> np.n
             q.append((y, W - 1))
     while q:
         y, x = q.popleft()
-        for dy, dx in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+        for dy, dx in ((1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)):
             ny, nx = y + dy, x + dx
             if 0 <= ny < H and 0 <= nx < W and water[ny, nx] and not ocean[ny, nx]:
                 ocean[ny, nx] = True
                 q.append((ny, nx))
 
+    # Fill small lakes (8-neigh components not connected to border) under threshold
     lakes = water & (~ocean)
     seen = np.zeros_like(lakes, dtype=bool)
     for sy in range(H):
         for sx in range(W):
             if lakes[sy, sx] and not seen[sy, sx]:
-                comp_size = 0
                 comp_cells = []
+                comp_size = 0
                 dq = deque([(sy, sx)])
                 seen[sy, sx] = True
                 small = True
@@ -231,7 +265,7 @@ def fill_small_lakes_on_halo(land_halo: np.ndarray, max_area: int = 150) -> np.n
                         small = False
                         dq.clear()
                         break
-                    for dy, dx in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                    for dy, dx in ((1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)):
                         ny, nx = cy + dy, cx + dx
                         if 0 <= ny < H and 0 <= nx < W and lakes[ny, nx] and not seen[ny, nx]:
                             seen[ny, nx] = True
@@ -362,44 +396,36 @@ class TerrainGenerator:
         macro = MacroContinents(p)
         field_halo = macro.continent_field(gx, gy)
 
-        # Freeze sea level per TerrainGenerator (first use from current field sample)
         if self._sea_level is None:
             self._sea_level = float(np.percentile(field_halo, 60.0))
         thr = self._sea_level
 
-        # Geometric band on HALO using Euclid-ish distance
         coarse_land = field_halo >= thr
         dist_land = euclidish_dist(coarse_land)
         dist_water = euclidish_dist(~coarse_land)
         geo_band_halo = (dist_land <= band_tiles) | (dist_water <= band_tiles)
 
-        # Edge detail only in geometric band
         detail = macro.noise.fbm(gx, gy, p.coast_detail_freq, octaves=3, salt=1300)
         detail = (detail - 0.5) * p.coast_detail_amp
         shaped = field_halo + detail * geo_band_halo
         land_halo = shaped >= thr
 
-        # 8-neigh band-limited closing + tendril pruning within band
         land_halo = band_limited_close_8(land_halo, geo_band_halo, iters=p.close_iters)
         land_halo = prune_tendrils(land_halo, geo_band_halo, min_width=3)
-
-        # Fill small inland lakes on HALO
+        land_halo = majority_smooth(land_halo, geo_band_halo, rounds=1)
         land_halo = fill_small_lakes_on_halo(land_halo, max_area=150)
         ocean_mask_halo = ~land_halo
 
-        # --- Build heightfield on HALO ---
         inland = np.clip((field_halo - thr) / (1 - thr + 1e-6), 0.0, 1.0)
         relief = macro.noise.fbm(gx * 0.8 + 77.0, gy * 0.8 - 33.0, freq=1.0 / 280.0, octaves=4, salt=1700)
         relief = 1.0 - np.abs(relief - 0.5) * 2.0
         height_halo = inland + 0.45 * (inland ** 1.2) * (relief - 0.5)
 
-        # Distance-to-ocean bias
         dist_to_ocean_halo = manhattan_dist_to_water(land_halo)
         dist_norm = np.minimum(dist_to_ocean_halo, 12).astype(np.float32) / 12.0
         height_halo += 0.04 * dist_norm
         height_halo = np.where(ocean_mask_halo, -10.0, height_halo)
 
-        # --- Flow on HALO ---
         to_index_h, _ = self._steepest_descent(height_halo)
         Hh, Wh = height_halo.shape
         Nh = Hh * Wh
@@ -408,7 +434,6 @@ class TerrainGenerator:
         np.add.at(acc_h, to_index_h[order_h], acc_h[order_h])
         FA_h = acc_h.reshape(Hh, Wh)
 
-        # Slope and flatness on HALO
         neighbors_h = [self._shift_edge(height_halo, int(dy), int(dx)) for dy, dx in zip(self._DY, self._DX)]
         slopes_h = [np.maximum(height_halo - nb, 0.0) for nb in neighbors_h]
         slope_h = np.maximum.reduce(slopes_h)
@@ -421,7 +446,6 @@ class TerrainGenerator:
             thresh = np.inf
         rivers_h = river_power_h >= thresh
 
-        # Near-coast cull on HALO but keep real mouths; also remove isolated splashes
         def touch(mask: np.ndarray) -> np.ndarray:
             return np.logical_or.reduce([self._shift_edge(mask, int(dy), int(dx)) for dy, dx in zip(self._DY, self._DX)])
 
@@ -431,7 +455,6 @@ class TerrainGenerator:
         isolated_near = near_coast_h & rivers_h & (~touch(rivers_h))
         rivers_h[isolated_near] = False
 
-        # Crop masks to requested area
         sl = (slice(HALO, HALO + height_tiles), slice(HALO, HALO + width_tiles))
         rivers = rivers_h[sl]
         ocean_mask = ocean_mask_halo[sl]
