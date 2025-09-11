@@ -12,7 +12,7 @@ class MacroParams:
     shape_exp: float = 2.0
     sea_level: float = 0.45
     coast_detail_freq: float = 1.0 / 300.0
-    coast_detail_amp: float = 0.04
+    coast_detail_amp: float = 0.03
     close_iters: int = 1
     coast_band_width: float = 0.08
     coast_band_tiles: int = 8
@@ -463,6 +463,12 @@ class TerrainGenerator:
         rivers_h = (rivers_h & ~near_coast_h) | mouth_h
         isolated_near = near_coast_h & rivers_h & (~touch(rivers_h))
         rivers_h[isolated_near] = False
+
+        # Keep only river components connected to inland seeds
+        inland_seeds = coarse_land & land_halo
+        river_components = _erode_8(rivers_h)
+        connected_river_components = geodesic_reconstruct(candidate=river_components, core=inland_seeds, max_iters=band_tiles + 4)
+        rivers_h[geo_band_halo] = connected_river_components[geo_band_halo]
 
         sl = (slice(HALO, HALO + height_tiles), slice(HALO, HALO + width_tiles))
         rivers = rivers_h[sl]
