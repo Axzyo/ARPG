@@ -1,5 +1,6 @@
 import numpy as np
 from dataclasses import dataclass
+from collections import deque
 
 
 @dataclass
@@ -14,6 +15,7 @@ class MacroParams:
     coast_detail_amp: float = 0.05
     close_iters: int = 1
     coast_band_width: float = 0.08
+    coast_band_tiles: int = 6
 
 
 class _ValueNoise:
@@ -141,6 +143,66 @@ def prune_tendrils(land: np.ndarray, band: np.ndarray, min_width: int = 3) -> np
     return out
 
 
+def fill_small_lakes_on_halo(land_halo: np.ndarray, max_area: int = 150) -> np.ndarray:
+    H, W = land_halo.shape
+    water = ~land_halo
+
+    # Ocean flood-fill from border water
+    ocean = np.zeros_like(water, dtype=bool)
+    q = deque()
+    for x in range(W):
+        if water[0, x]:
+            ocean[0, x] = True
+            q.append((0, x))
+        if water[H - 1, x]:
+            ocean[H - 1, x] = True
+            q.append((H - 1, x))
+    for y in range(H):
+        if water[y, 0]:
+            ocean[y, 0] = True
+            q.append((y, 0))
+        if water[y, W - 1]:
+            ocean[y, W - 1] = True
+            q.append((y, W - 1))
+    while q:
+        y, x = q.popleft()
+        for dy, dx in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            ny, nx = y + dy, x + dx
+            if 0 <= ny < H and 0 <= nx < W and water[ny, nx] and not ocean[ny, nx]:
+                ocean[ny, nx] = True
+                q.append((ny, nx))
+
+    # Fill small lakes (water not connected to border) under threshold
+    lakes = water & (~ocean)
+    seen = np.zeros_like(lakes, dtype=bool)
+    for sy in range(H):
+        for sx in range(W):
+            if lakes[sy, sx] and not seen[sy, sx]:
+                comp_size = 0
+                comp_cells = []
+                dq = deque([(sy, sx)])
+                seen[sy, sx] = True
+                small = True
+                while dq:
+                    cy, cx = dq.popleft()
+                    comp_cells.append((cy, cx))
+                    comp_size += 1
+                    if comp_size > max_area:
+                        small = False
+                        # drain the queue without recording further to keep seen marks
+                        dq.clear()
+                        break
+                    for dy, dx in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                        ny, nx = cy + dy, cx + dx
+                        if 0 <= ny < H and 0 <= nx < W and lakes[ny, nx] and not seen[ny, nx]:
+                            seen[ny, nx] = True
+                            dq.append((ny, nx))
+                if small:
+                    for cy, cx in comp_cells:
+                        land_halo[cy, cx] = True
+    return land_halo
+
+
 class MacroContinents:
     def __init__(self, p: MacroParams):
         self.p = p
@@ -169,13 +231,22 @@ class MacroContinents:
         field = self.continent_field(gx, gy)
         # Adaptive sea level (percentile) for robust ocean/land balance
         thr = float(np.percentile(field, 60.0))
-        band = np.abs(field - thr) < p.coast_band_width
+
+        # Geometric coastal band via brushfire distances
+        coarse_land = field >= thr
+        dist_in_land = manhattan_dist_to_water(coarse_land)
+        dist_in_water = manhattan_dist_to_water(~coarse_land)
+        geo_band = (dist_in_land <= int(p.coast_band_tiles)) | (dist_in_water <= int(p.coast_band_tiles))
+
+        # Only wobble the edge, not interiors
         detail = self.noise.fbm(gx, gy, p.coast_detail_freq, octaves=3, salt=1300)
         detail = (detail - 0.5) * p.coast_detail_amp
-        shaped = field + detail * band
+        shaped = field + detail * geo_band
         land = shaped >= thr
-        land_closed = band_limited_close(land, band, iters=p.close_iters)
-        land_pruned = prune_tendrils(land_closed, band, min_width=3)
+
+        # Band-limited closing and tendril pruning restricted to geometric band
+        land_closed = band_limited_close(land, geo_band, iters=p.close_iters)
+        land_pruned = prune_tendrils(land_closed, geo_band, min_width=3)
         return land_pruned, field, thr
 from constants import CHUNK_SIZE
 
@@ -305,8 +376,12 @@ class TerrainGenerator:
 
         This matches the per-chunk logic but works over an arbitrary rectangle without Python loops.
         """
+        # Parameters and HALO sized to cover band reach and morphology
+        p = MacroParams(seed=self.seed)
+        band_tiles = int(p.coast_band_tiles)
+        HALO = max(16, band_tiles + p.close_iters + 8)
+
         # Create a HALO around requested area to eliminate boundary artifacts in morphology
-        HALO = max(16, int(MacroParams.coast_band_width * 256))
         y, x = np.mgrid[-HALO:height_tiles + HALO, -HALO:width_tiles + HALO]
         gx = x0_tile + x
         gy = y0_tile + y
@@ -319,8 +394,10 @@ class TerrainGenerator:
         gxw = gx + (wx - 0.5) * 2.0 * warp_amp
         gyw = gy + (wy - 0.5) * 2.0 * warp_amp
 
-        macro = MacroContinents(MacroParams(seed=self.seed))
+        macro = MacroContinents(p)
         land_mask_halo, field_halo, thr = macro.land_mask(gxw, gyw)
+        # Fill small inland lakes on HALO before cropping
+        land_mask_halo = fill_small_lakes_on_halo(land_mask_halo, max_area=150)
         ocean_mask_halo = ~land_mask_halo
 
         # --- Build heightfield on land (HALO region) ---
