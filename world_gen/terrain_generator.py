@@ -189,7 +189,6 @@ def fill_small_lakes_on_halo(land_halo: np.ndarray, max_area: int = 150) -> np.n
                     comp_size += 1
                     if comp_size > max_area:
                         small = False
-                        # drain the queue without recording further to keep seen marks
                         dq.clear()
                         break
                     for dy, dx in ((1, 0), (-1, 0), (0, 1), (0, -1)):
@@ -379,33 +378,31 @@ class TerrainGenerator:
         # Parameters and HALO sized to cover band reach and morphology
         p = MacroParams(seed=self.seed)
         band_tiles = int(p.coast_band_tiles)
-        HALO = max(16, band_tiles + p.close_iters + 8)
+        HALO = max(32, band_tiles + p.close_iters + 12)
 
         # Create a HALO around requested area to eliminate boundary artifacts in morphology
         y, x = np.mgrid[-HALO:height_tiles + HALO, -HALO:width_tiles + HALO]
         gx = x0_tile + x
         gy = y0_tile + y
 
-        # Domain warp used by continents step
-        warp_step = 96.0
-        warp_amp = 18.0
-        wx = self._value_noise(gx, gy, warp_step, salt=900)
-        wy = self._value_noise(gx + 1000, gy + 1000, warp_step, salt=901)
-        gxw = gx + (wx - 0.5) * 2.0 * warp_amp
-        gyw = gy + (wy - 0.5) * 2.0 * warp_amp
-
         macro = MacroContinents(p)
-        land_mask_halo, field_halo, thr = macro.land_mask(gxw, gyw)
+        # Patch 1: remove manual warp; MacroContinents handles warp internally
+        land_mask_halo, field_halo, thr = macro.land_mask(gx, gy)
         # Fill small inland lakes on HALO before cropping
         land_mask_halo = fill_small_lakes_on_halo(land_mask_halo, max_area=150)
         ocean_mask_halo = ~land_mask_halo
 
         # --- Build heightfield on land (HALO region) ---
         inland = np.clip((field_halo - thr) / (1 - thr + 1e-6), 0.0, 1.0)
-        relief = macro.noise.fbm(gxw * 0.8 + 77.0, gyw * 0.8 - 33.0, freq=1.0 / 280.0, octaves=4, salt=1700)
+        relief = macro.noise.fbm(gx * 0.8 + 77.0, gy * 0.8 - 33.0, freq=1.0 / 280.0, octaves=4, salt=1700)
         relief = 1.0 - np.abs(relief - 0.5) * 2.0
         height = inland + 0.45 * (inland ** 1.2) * (relief - 0.5)
-        height += 0.02 * (inland - 1.0)
+
+        # Patch 2: distance-to-ocean gradient to bias downhill through coast
+        dist_to_ocean_halo = manhattan_dist_to_water(land_mask_halo)
+        dist_norm = np.minimum(dist_to_ocean_halo, 12).astype(np.float32) / 12.0
+        height += 0.04 * dist_norm
+
         height = np.where(ocean_mask_halo, -10.0, height)
 
         # Crop back to requested area after band-limited operations
@@ -413,6 +410,7 @@ class TerrainGenerator:
         height = height[sl]
         land_mask = land_mask_halo[sl]
         ocean_mask = ocean_mask_halo[sl]
+        dist_to_ocean = dist_to_ocean_halo[sl]
 
         # --- Flow directions (D8) & accumulation on cropped area ---
         to_index, _ = self._steepest_descent(height)
@@ -435,6 +433,15 @@ class TerrainGenerator:
         else:
             thresh = np.inf
         rivers = river_power >= thresh
+
+        # Patch 3: suppress coast-parallel rivers; keep mouths touching ocean
+        def touch_ocean(mask: np.ndarray) -> np.ndarray:
+            neigh = [self._shift_edge(mask, int(dy), int(dx)) for dy, dx in zip(self._DY, self._DX)]
+            return np.logical_or.reduce(neigh)
+
+        near_coast = dist_to_ocean <= 2
+        mouth = rivers & touch_ocean(ocean_mask)
+        rivers = (rivers & (~near_coast)) | mouth
 
         water_mask = ocean_mask | (rivers & (~ocean_mask))
         return water_mask
