@@ -403,16 +403,25 @@ class TerrainGenerator:
         coarse_land = field_halo >= thr
         dist_land = euclidish_dist(coarse_land)
         dist_water = euclidish_dist(~coarse_land)
-        geo_band_halo = (dist_land <= band_tiles) | (dist_water <= band_tiles)
+        band_land_halo = (dist_land <= band_tiles)
+        band_water_halo = (dist_water <= band_tiles)
+        geo_band_halo = band_land_halo | band_water_halo
 
         detail = macro.noise.fbm(gx, gy, p.coast_detail_freq, octaves=3, salt=1300)
         detail = (detail - 0.5) * p.coast_detail_amp
         shaped = field_halo + detail * geo_band_halo
         land_halo = shaped >= thr
 
-        land_halo = band_limited_close_8(land_halo, geo_band_halo, iters=p.close_iters)
-        land_halo = prune_tendrils(land_halo, geo_band_halo, min_width=3)
-        land_halo = majority_smooth(land_halo, geo_band_halo, rounds=1)
+        # Land-side only edits (do not mutate ocean side)
+        land_halo = band_limited_close_8(land_halo, band_land_halo, iters=p.close_iters)
+        land_halo = prune_tendrils(land_halo, band_land_halo, min_width=3)
+        land_halo = majority_smooth(land_halo, band_land_halo, rounds=1)
+
+        # Enforce connectivity to coarse_land to prevent offshore flips
+        candidate = land_halo
+        connected = geodesic_reconstruct(candidate=candidate, core=coarse_land, max_iters=band_tiles + 4)
+        land_halo[geo_band_halo] = connected[geo_band_halo]
+
         land_halo = fill_small_lakes_on_halo(land_halo, max_area=150)
         ocean_mask_halo = ~land_halo
 
@@ -465,3 +474,14 @@ class TerrainGenerator:
     def generate_area_tiles(self, x0_tile: int, y0_tile: int, width_tiles: int, height_tiles: int) -> np.ndarray:
         mask = self.generate_area_water_mask(x0_tile, y0_tile, width_tiles, height_tiles)
         return np.where(mask, "water", "grass").astype(object)
+
+
+def geodesic_reconstruct(candidate: np.ndarray, core: np.ndarray, max_iters: int = 32) -> np.ndarray:
+    """Keep only cells in `candidate` that are 8-connected to `core`."""
+    rec = core.copy()
+    for _ in range(max(0, int(max_iters))):
+        new = _dilate_8(rec) & candidate
+        if np.array_equal(new, rec):
+            break
+        rec = new
+    return rec
