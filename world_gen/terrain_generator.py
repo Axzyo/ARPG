@@ -407,21 +407,30 @@ class TerrainGenerator:
         band_water_halo = (dist_water <= band_tiles)
         geo_band_halo = band_land_halo | band_water_halo
 
+        # One-sided signed-distance wobble that fades to zero at band edge
+        sd = field_halo - thr  # positive on land
+        dist_edge = np.minimum(dist_land, dist_water).astype(np.float32)
+        w = np.clip(1.0 - dist_edge / float(band_tiles), 0.0, 1.0)
         detail = macro.noise.fbm(gx, gy, p.coast_detail_freq, octaves=3, salt=1300)
-        detail = (detail - 0.5) * p.coast_detail_amp
-        shaped = field_halo + detail * geo_band_halo
-        land_halo = shaped >= thr
+        detail = (detail - 0.5) * (p.coast_detail_amp * 2.0)
+        sd = sd + detail * w  # no effect away from coast, symmetric fade
 
-        # Land-side only edits (do not mutate ocean side)
-        land_halo = band_limited_close_8(land_halo, band_land_halo, iters=p.close_iters)
-        land_halo = prune_tendrils(land_halo, band_land_halo, min_width=3)
-        land_halo = majority_smooth(land_halo, band_land_halo, rounds=1)
+        # Threshold back to land/water
+        land_halo = sd >= 0.0
 
-        # Enforce connectivity to coarse_land to prevent offshore flips
-        candidate = land_halo
-        connected = geodesic_reconstruct(candidate=candidate, core=coarse_land, max_iters=band_tiles + 4)
-        land_halo[geo_band_halo] = connected[geo_band_halo]
+        # Symmetric 8-neigh opening then closing only inside coastal band
+        tmp = land_halo.copy()
+        for _ in range(max(1, p.close_iters)):
+            tmp = _dilate_8(_erode_8(tmp))
+            tmp = _erode_8(_dilate_8(tmp))
+        land_halo[geo_band_halo] = tmp[geo_band_halo]
 
+        # Connectivity to coarse_land to prevent offshore speckles
+        land_halo[geo_band_halo] = geodesic_reconstruct(
+            candidate=land_halo, core=coarse_land, max_iters=band_tiles + 4
+        )[geo_band_halo]
+
+        # Fill small inland lakes on HALO
         land_halo = fill_small_lakes_on_halo(land_halo, max_area=150)
         ocean_mask_halo = ~land_halo
 
@@ -450,25 +459,18 @@ class TerrainGenerator:
 
         river_power_h = FA_h * flatness_h * land_halo
         if land_halo.any():
-            thresh = np.percentile(river_power_h[land_halo], 97.0)
+            thresh = np.percentile(river_power_h[land_halo], 95.0)
         else:
             thresh = np.inf
         rivers_h = river_power_h >= thresh
 
-        def touch(mask: np.ndarray) -> np.ndarray:
-            return np.logical_or.reduce([self._shift_edge(mask, int(dy), int(dx)) for dy, dx in zip(self._DY, self._DX)])
-
-        near_coast_h = dist_to_ocean_halo <= 2
-        mouth_h = rivers_h & touch(ocean_mask_halo)
-        rivers_h = (rivers_h & ~near_coast_h) | mouth_h
-        isolated_near = near_coast_h & rivers_h & (~touch(rivers_h))
-        rivers_h[isolated_near] = False
-
-        # Keep only river components connected to inland seeds (seed with river pixels, not land)
-        interior = dist_to_ocean_halo > (band_tiles + 2)
-        seed = rivers_h & interior
-        connected = geodesic_reconstruct(candidate=rivers_h, core=seed, max_iters=band_tiles + 8)
-        rivers_h = connected
+        # Keep only river pixels on a downstream path from interior seeds
+        Hh, Wh = height_halo.shape
+        is_river = (rivers_h & land_halo).ravel()
+        interior = (dist_to_ocean_halo > 2).ravel()
+        seeds = is_river & interior
+        keep = downstream_mark(to_index_h, seeds, max_steps=Hh + Wh)
+        rivers_h = (is_river & keep).reshape(Hh, Wh)
 
         sl = (slice(HALO, HALO + height_tiles), slice(HALO, HALO + width_tiles))
         rivers = rivers_h[sl]
@@ -491,3 +493,16 @@ def geodesic_reconstruct(candidate: np.ndarray, core: np.ndarray, max_iters: int
             break
         rec = new
     return rec
+
+
+def downstream_mark(to_index: np.ndarray, seeds: np.ndarray, max_steps: int) -> np.ndarray:
+    """Propagate True flags one step downstream per iteration until convergence."""
+    keep = seeds.copy()
+    for _ in range(max(1, int(max_steps))):
+        dst = to_index[keep]
+        new = keep.copy()
+        new[dst] = True
+        if new.sum() == keep.sum():
+            break
+        keep = new
+    return keep
