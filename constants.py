@@ -17,13 +17,16 @@ SCALE_W = NATIVE_WIDTH / REFERENCE_WIDTH
 SCALE_H = NATIVE_HEIGHT / REFERENCE_HEIGHT
 SCALE = min(SCALE_W, SCALE_H)  # Use minimum to maintain aspect ratio
 
+# World zoom (1.0 = default scale). Lower values zoom out (smaller tiles).
+WORLD_ZOOM = 0.70
+
 # Screen settings (fullscreen uses native resolution)
 SCREEN_WIDTH = NATIVE_WIDTH
 SCREEN_HEIGHT = NATIVE_HEIGHT
 FPS = 60
 
 # Tile and chunk settings (dynamically scaled)
-TILE_SIZE = max(16, int(REFERENCE_TILE_SIZE * SCALE))  # Minimum 16px tiles
+TILE_SIZE = max(12, int(REFERENCE_TILE_SIZE * SCALE * WORLD_ZOOM))  # Minimum 12px tiles
 CHUNK_SIZE = 16  # 16x16 tiles per chunk
 RENDER_DISTANCE = 2  # Number of chunks to render around player
 
@@ -31,6 +34,7 @@ RENDER_DISTANCE = 2  # Number of chunks to render around player
 BLACK = (0, 0, 0)
 WHITE = (255, 255, 255)
 GRASS_COLOR = (104, 178, 78)  # #68b24e
+WATER_COLOR = (64, 105, 225)  # Deep blue for water
 GRID_COLOR = (200, 200, 200, 128)  # Light grey with 50% transparency
 CHUNK_BORDER_COLOR = (120, 120, 120, 128)  # Darker grey with 50% transparency
 PLAYER_COLOR = (255, 100, 100)  # Red player

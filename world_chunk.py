@@ -1,13 +1,16 @@
 import pygame
 import random
 from constants import *
+from world_gen.terrain_generator import TerrainGenerator
 
 class Chunk:
-    def __init__(self, chunk_x, chunk_y):
+    def __init__(self, chunk_x, chunk_y, terrain_gen: TerrainGenerator | None = None):
         self.chunk_x = chunk_x
         self.chunk_y = chunk_y
         self.world_x = chunk_x * CHUNK_SIZE * TILE_SIZE
         self.world_y = chunk_y * CHUNK_SIZE * TILE_SIZE
+        self.terrain_gen = terrain_gen or TerrainGenerator()
+        self._tile_images = None  # Lazy-loaded tile images
         
         # Generate terrain for this chunk
         self.generate_terrain()
@@ -18,19 +21,41 @@ class Chunk:
     
     def generate_terrain(self):
         """Generate terrain data for this chunk"""
-        # For now, just grass everywhere
-        # You can expand this later with noise functions for varied terrain
-        self.tiles = []
-        for y in range(CHUNK_SIZE):
-            row = []
-            for x in range(CHUNK_SIZE):
-                # All tiles are grass for now
-                row.append('grass')
-            self.tiles.append(row)
+        # Use vectorized generator for oceans and rivers
+        self.tiles = self.terrain_gen.generate_water_and_land(self.chunk_x, self.chunk_y)
+
+    def _load_tiles_if_needed(self):
+        """Load and scale tile images once (grass, water)."""
+        if self._tile_images is not None:
+            return
+        self._tile_images = {}
+        try:
+            grass_img = pygame.image.load('assets/tiles/tilesets/grass.png').convert()
+            water_img = pygame.image.load('assets/tiles/tilesets/water.png').convert()
+            grass_img = pygame.transform.scale(grass_img, (TILE_SIZE, TILE_SIZE))
+            water_img = pygame.transform.scale(water_img, (TILE_SIZE, TILE_SIZE))
+            self._tile_images['grass'] = grass_img
+            self._tile_images['water'] = water_img
+        except Exception:
+            # Fallback to colored fills if images are missing
+            self._tile_images['grass'] = None
+            self._tile_images['water'] = None
     
     def render_to_surface(self):
         """Pre-render the chunk to a surface"""
-        self.surface.fill(GRASS_COLOR)
+        self._load_tiles_if_needed()
+        # Draw tiles
+        for ty, row in enumerate(self.tiles):
+            for tx, tile in enumerate(row):
+                dest = (tx * TILE_SIZE, ty * TILE_SIZE)
+                img = self._tile_images.get(tile)
+                if img is not None:
+                    self.surface.blit(img, dest)
+                else:
+                    # Fallback solid fill
+                    color = WATER_COLOR if tile == 'water' else GRASS_COLOR
+                    rect = pygame.Rect(dest[0], dest[1], TILE_SIZE, TILE_SIZE)
+                    pygame.draw.rect(self.surface, color, rect)
         
         # Create temporary surface for transparent grid lines
         grid_surface = pygame.Surface((CHUNK_SIZE * TILE_SIZE, CHUNK_SIZE * TILE_SIZE), pygame.SRCALPHA)

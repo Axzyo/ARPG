@@ -1,12 +1,19 @@
 import pygame
 import math
+import random
 from constants import *
 from world_chunk import Chunk
+from world_gen.terrain_generator import TerrainGenerator
 
 class ChunkManager:
-    def __init__(self):
+    def __init__(self, seed: int | None = None):
         self.chunks = {}  # Dictionary to store loaded chunks {(chunk_x, chunk_y): Chunk}
         self.last_player_chunk = None
+        # Generate a random world seed once per session
+        self.world_seed = int(seed) if seed is not None else random.SystemRandom().randint(0, 2**31 - 1)
+        print(f"[WORLD] Seed: {self.world_seed}")
+        # Single terrain generator shared across all chunks for determinism
+        self.terrain_gen = TerrainGenerator(seed=self.world_seed)
         
     def get_chunk_coords(self, world_x, world_y):
         """Convert world coordinates to chunk coordinates"""
@@ -19,7 +26,7 @@ class ChunkManager:
         chunk_key = (chunk_x, chunk_y)
         
         if chunk_key not in self.chunks:
-            self.chunks[chunk_key] = Chunk(chunk_x, chunk_y)
+            self.chunks[chunk_key] = Chunk(chunk_x, chunk_y, terrain_gen=self.terrain_gen)
             
         return self.chunks[chunk_key]
     
