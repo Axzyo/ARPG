@@ -464,11 +464,11 @@ class TerrainGenerator:
         isolated_near = near_coast_h & rivers_h & (~touch(rivers_h))
         rivers_h[isolated_near] = False
 
-        # Keep only river components connected to inland seeds
-        inland_seeds = coarse_land & land_halo
-        river_components = _erode_8(rivers_h)
-        connected_river_components = geodesic_reconstruct(candidate=river_components, core=inland_seeds, max_iters=band_tiles + 4)
-        rivers_h[geo_band_halo] = connected_river_components[geo_band_halo]
+        # Keep only river components connected to inland seeds (seed with river pixels, not land)
+        interior = dist_to_ocean_halo > (band_tiles + 2)
+        seed = rivers_h & interior
+        connected = geodesic_reconstruct(candidate=rivers_h, core=seed, max_iters=band_tiles + 8)
+        rivers_h = connected
 
         sl = (slice(HALO, HALO + height_tiles), slice(HALO, HALO + width_tiles))
         rivers = rivers_h[sl]
