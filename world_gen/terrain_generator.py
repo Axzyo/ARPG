@@ -64,24 +64,37 @@ class _ValueNoise:
         return value / sum_amp
 
 
+def _shift_bool(a: np.ndarray, dy: int, dx: int, fill: bool) -> np.ndarray:
+    H, W = a.shape
+    out = np.full((H, W), fill, dtype=bool)
+    ys = slice(max(0, dy), min(H, H + dy))
+    xs = slice(max(0, dx), min(W, W + dx))
+    ys_src = slice(max(0, -dy), min(H, H - dy))
+    xs_src = slice(max(0, -dx), min(W, W - dx))
+    out[ys, xs] = a[ys_src, xs_src]
+    return out
+
+
 def _dilate_cross(mask: np.ndarray) -> np.ndarray:
-    a = mask.astype(np.uint8)
-    up = np.pad(a[:-1, :], ((1, 0), (0, 0)), mode='edge')
-    down = np.pad(a[1:, :], ((0, 1), (0, 0)), mode='edge')
-    left = np.pad(a[:, :-1], ((0, 0), (1, 0)), mode='edge')
-    right = np.pad(a[:, 1:], ((0, 0), (0, 1)), mode='edge')
-    center = a
-    return (np.maximum.reduce([center, up, down, left, right]) > 0)
+    m = mask.astype(bool)
+    return (
+        m
+        | _shift_bool(m, 1, 0, False)
+        | _shift_bool(m, -1, 0, False)
+        | _shift_bool(m, 0, 1, False)
+        | _shift_bool(m, 0, -1, False)
+    )
 
 
 def _erode_cross(mask: np.ndarray) -> np.ndarray:
-    a = mask.astype(np.uint8)
-    up = np.pad(a[:-1, :], ((1, 0), (0, 0)), mode='edge')
-    down = np.pad(a[1:, :], ((0, 1), (0, 0)), mode='edge')
-    left = np.pad(a[:, :-1], ((0, 0), (1, 0)), mode='edge')
-    right = np.pad(a[:, 1:], ((0, 0), (0, 1)), mode='edge')
-    center = a
-    return (np.minimum.reduce([center, up, down, left, right]) > 0)
+    m = mask.astype(bool)
+    return (
+        m
+        & _shift_bool(m, 1, 0, True)
+        & _shift_bool(m, -1, 0, True)
+        & _shift_bool(m, 0, 1, True)
+        & _shift_bool(m, 0, -1, True)
+    )
 
 
 def band_limited_close(land: np.ndarray, band: np.ndarray, iters: int = 1) -> np.ndarray:
@@ -292,7 +305,9 @@ class TerrainGenerator:
 
         This matches the per-chunk logic but works over an arbitrary rectangle without Python loops.
         """
-        y, x = np.mgrid[0:height_tiles, 0:width_tiles]
+        # Create a HALO around requested area to eliminate boundary artifacts in morphology
+        HALO = max(16, int(MacroParams.coast_band_width * 256))
+        y, x = np.mgrid[-HALO:height_tiles + HALO, -HALO:width_tiles + HALO]
         gx = x0_tile + x
         gy = y0_tile + y
 
@@ -305,18 +320,24 @@ class TerrainGenerator:
         gyw = gy + (wy - 0.5) * 2.0 * warp_amp
 
         macro = MacroContinents(MacroParams(seed=self.seed))
-        land_mask, field, thr = macro.land_mask(gxw, gyw)
-        ocean_mask = ~land_mask
+        land_mask_halo, field_halo, thr = macro.land_mask(gxw, gyw)
+        ocean_mask_halo = ~land_mask_halo
 
-        # --- Build heightfield on land ---
-        inland = np.clip((field - thr) / (1 - thr + 1e-6), 0.0, 1.0)
+        # --- Build heightfield on land (HALO region) ---
+        inland = np.clip((field_halo - thr) / (1 - thr + 1e-6), 0.0, 1.0)
         relief = macro.noise.fbm(gxw * 0.8 + 77.0, gyw * 0.8 - 33.0, freq=1.0 / 280.0, octaves=4, salt=1700)
         relief = 1.0 - np.abs(relief - 0.5) * 2.0
         height = inland + 0.45 * (inland ** 1.2) * (relief - 0.5)
         height += 0.02 * (inland - 1.0)
-        height = np.where(ocean_mask, -10.0, height)
+        height = np.where(ocean_mask_halo, -10.0, height)
 
-        # --- Flow directions (D8) & accumulation ---
+        # Crop back to requested area after band-limited operations
+        sl = (slice(HALO, HALO + height_tiles), slice(HALO, HALO + width_tiles))
+        height = height[sl]
+        land_mask = land_mask_halo[sl]
+        ocean_mask = ocean_mask_halo[sl]
+
+        # --- Flow directions (D8) & accumulation on cropped area ---
         to_index, _ = self._steepest_descent(height)
         H, W = height.shape
         N = H * W
