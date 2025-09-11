@@ -434,6 +434,7 @@ class TerrainGenerator:
         land_halo = fill_small_lakes_on_halo(land_halo, max_area=150)
         ocean_mask_halo = ~land_halo
 
+        # --- Build heightfield on HALO (kept for future use, but rivers disabled) ---
         inland = np.clip((field_halo - thr) / (1 - thr + 1e-6), 0.0, 1.0)
         relief = macro.noise.fbm(gx * 0.8 + 77.0, gy * 0.8 - 33.0, freq=1.0 / 280.0, octaves=4, salt=1700)
         relief = 1.0 - np.abs(relief - 0.5) * 2.0
@@ -444,39 +445,8 @@ class TerrainGenerator:
         height_halo += 0.04 * dist_norm
         height_halo = np.where(ocean_mask_halo, -10.0, height_halo)
 
-        to_index_h, _ = self._steepest_descent(height_halo)
-        Hh, Wh = height_halo.shape
-        Nh = Hh * Wh
-        order_h = np.argsort(height_halo.ravel())[::-1]
-        acc_h = np.ones(Nh, dtype=np.float32)
-        np.add.at(acc_h, to_index_h[order_h], acc_h[order_h])
-        FA_h = acc_h.reshape(Hh, Wh)
-
-        neighbors_h = [self._shift_edge(height_halo, int(dy), int(dx)) for dy, dx in zip(self._DY, self._DX)]
-        slopes_h = [np.maximum(height_halo - nb, 0.0) for nb in neighbors_h]
-        slope_h = np.maximum.reduce(slopes_h)
-        flatness_h = 1.0 / (1.0 + 30.0 * slope_h)
-
-        river_power_h = FA_h * flatness_h * land_halo
-        if land_halo.any():
-            thresh = np.percentile(river_power_h[land_halo], 95.0)
-        else:
-            thresh = np.inf
-        rivers_h = river_power_h >= thresh
-
-        # Keep only river pixels on a downstream path from interior seeds
-        Hh, Wh = height_halo.shape
-        is_river = (rivers_h & land_halo).ravel()
-        interior = (dist_to_ocean_halo > 2).ravel()
-        seeds = is_river & interior
-        keep = downstream_mark(to_index_h, seeds, max_steps=Hh + Wh)
-        rivers_h = (is_river & keep).reshape(Hh, Wh)
-
         sl = (slice(HALO, HALO + height_tiles), slice(HALO, HALO + width_tiles))
-        rivers = rivers_h[sl]
-        ocean_mask = ocean_mask_halo[sl]
-
-        water_mask = ocean_mask | (rivers & ~ocean_mask)
+        water_mask = ocean_mask_halo[sl]
         return water_mask
 
     def generate_area_tiles(self, x0_tile: int, y0_tile: int, width_tiles: int, height_tiles: int) -> np.ndarray:
